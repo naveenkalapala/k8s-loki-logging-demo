@@ -1,0 +1,249 @@
+---
+# 1. Shared volume for logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logs-volume
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# 2. Log Generator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-generator
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-generator
+  template:
+    metadata:
+      labels:
+        app: log-generator
+    spec:
+      containers:
+      - name: log-generator
+        image: mingrammer/flog:0.4.3
+        args:
+        - --loop
+        - --format=json
+        - --number=10  # number of log lines per second
+        - --delay=100ms
+        - --output=/var/log/generated-logs.txt
+        - --overwrite
+        - --type=log
+        volumeMounts:
+        - name: log-storage
+          mountPath: /var/log
+      volumes:
+      - name: log-storage
+        persistentVolumeClaim:
+          claimName: logs-volume
+
+---
+# 3. Alloy ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: monitoring
+data:
+  config.alloy: |
+    // Scrape logs from the generated log file
+    loki.source.file "generated_logs" {
+      targets = [
+        {
+          __path__ = "/var/log/generated-logs.txt",
+          job      = "generated-logs",
+          namespace = "monitoring",
+        },
+      ]
+      forward_to = [loki.process.parse_json.receiver]
+    }
+
+    // Parse JSON logs and extract fields
+    loki.process "parse_json" {
+      forward_to = [loki.write.loki_endpoint.receiver]
+
+      stage.json {
+        expressions = {
+          http_method = "method",
+          http_status = "status",
+        }
+      }
+
+      stage.labels {
+        values = {
+          http_method = "",
+          http_status = "",
+        }
+      }
+    }
+
+    // Write logs to Loki in monitoring namespace
+    loki.write "loki_endpoint" {
+      endpoint {
+        url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        
+        // Add tenant_id header if needed
+        headers = {
+          "X-Scope-OrgID" = "fake",
+        }
+      }
+    }
+
+---
+# 4. Alloy Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alloy
+  template:
+    metadata:
+      labels:
+        app: alloy
+    spec:
+      containers:
+      - name: alloy
+        image: grafana/alloy:latest
+        args:
+        - run
+        - /etc/alloy/config.alloy
+        - --server.http.listen-addr=0.0.0.0:12345
+        - --storage.path=/tmp/alloy
+        ports:
+        - containerPort: 12345
+          name: http-metrics
+        volumeMounts:
+        - name: log-storage
+          mountPath: /var/log
+          readOnly: true
+        - name: alloy-config
+          mountPath: /etc/alloy
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: log-storage
+        persistentVolumeClaim:
+          claimName: logs-volume
+      - name: alloy-config
+        configMap:
+          name: alloy-config
+
+---
+# 5. Alloy Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    app: alloy
+spec:
+  ports:
+  - port: 12345
+    targetPort: 12345
+    name: http-metrics
+  selector:
+    app: alloy
+
+---
+# 6. ServiceMonitor for Alloy
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: alloy
+  endpoints:
+  - port: http-metrics
+    interval: 15s
+
+---
+# 7. Metrics Exporter
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-exporter
+  template:
+    metadata:
+      labels:
+        app: metrics-exporter
+    spec:
+      containers:
+      - name: metrics-exporter
+        image: rslim087/metrics-exporter:latest
+        ports:
+        - containerPort: 8082
+          name: metrics
+        volumeMounts:
+        - name: log-storage
+          mountPath: /var/log
+      volumes:
+      - name: log-storage
+        persistentVolumeClaim:
+          claimName: logs-volume
+
+---
+# 8. Metrics Exporter Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-exporter
+  namespace: monitoring
+  labels:
+    app: metrics-exporter
+spec:
+  ports:
+  - port: 8082
+    targetPort: 8082
+    name: metrics
+  selector:
+    app: metrics-exporter
+
+---
+# 9. ServiceMonitor for Metrics Exporter
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metrics-exporter
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: metrics-exporter
+  endpoints:
+  - port: metrics
+    interval: 15s
