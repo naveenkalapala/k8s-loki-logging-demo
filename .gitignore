@@ -1,0 +1,32 @@
+#Excludes unnecessary files from version control
+
+# Kubernetes
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Helm
+charts/
+*.tgz
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Local testing
+test-outputs/
+local-config/
+
+# Secrets (if any get added accidentally)
+*secret*.yaml
+*password*.yaml
+credentials.yaml

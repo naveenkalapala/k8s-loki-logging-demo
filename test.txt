@@ -1,0 +1,5 @@
+curl -H "Content-Type: application/json" -XPOST -s "http://localhost:3100/loki/api/v1/push"  \
+--data-raw "{\"streams\": [{\"stream\": {\"job\": \"test\"}, \"values\": [[\"$(date +%s)000000000\", \"fizzbuzz\"]]}]}"
+
+
+curl "http://localhost:3100/loki/api/v1/query_range" --data-urlencode 'query={job="test"}' | jq .data.result

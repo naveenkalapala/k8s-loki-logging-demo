@@ -1,4 +1,3 @@
-# Loki configuration for single binary mode with filesystem storage
 deploymentMode: SingleBinary
 
 loki:
@@ -30,14 +29,13 @@ singleBinary:
       cpu: 100m
       memory: 128Mi
     limits:
-      cpu: 200m
-      memory: 256Mi
+      cpu: 500m
+      memory: 512Mi
 
-# Enable gateway
+# Gateway
 gateway:
   enabled: true
-  replicas: 1
-
+  
 # Disable distributed components
 backend:
   replicas: 0
@@ -63,6 +61,8 @@ bloomCompactor:
   replicas: 0
 bloomGateway:
   replicas: 0
+ruler:
+  replicas: 0
 
 # Monitoring
 monitoring:
@@ -76,8 +76,10 @@ monitoring:
 test:
   enabled: false
 
-# Ensure we're using the right storage
 chunksCache:
   enabled: false
 resultsCache:
   enabled: false
+
+
+
