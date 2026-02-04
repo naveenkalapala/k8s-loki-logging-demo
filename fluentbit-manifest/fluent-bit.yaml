@@ -1,0 +1,198 @@
+---
+# 1. Shared volume for logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logs-volume
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteMany  
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# 2. Log Generator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-generator
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-generator
+  template:
+    metadata:
+      labels:
+        app: log-generator
+    spec:
+      containers:
+      - name: log-generator
+        image: mingrammer/flog:0.4.3
+        args:
+        - --loop
+        - --format=json
+        - --number=10  # number of log lines per second
+        - --delay=100ms
+        - --output=/var/log/generated-logs.txt
+        - --overwrite
+        - --type=log
+        volumeMounts:
+        - name: log-storage
+          mountPath: /var/log
+      volumes:
+      - name: log-storage
+        persistentVolumeClaim:
+          claimName: logs-volume
+
+---
+# 3. Fluent Bit ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Daemon Off
+        Flush 1
+        Log_Level info
+        Parsers_File parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+        Health_Check On
+
+    [INPUT]
+        Name tail
+        Path /var/log/generated-logs.txt
+        Parser json
+        Tag generated.logs
+        Refresh_Interval 5
+        Read_from_Head true
+
+    [FILTER]
+        Name modify
+        Match generated.logs
+        Add job generated-logs
+        Add namespace monitoring
+
+    [OUTPUT]
+        Name loki
+        Match generated.logs
+        Host loki-gateway.monitoring.svc.cluster.local
+        Port 80
+        Labels job=generated-logs, namespace=monitoring
+        Label_keys $method,$status
+        Auto_kubernetes_labels off
+        Tenant_ID fake
+
+  parsers.conf: |
+    [PARSER]
+        Name json
+        Format json
+        Time_Key datetime
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+        Time_Keep Off
+
+---
+# 4. Fluent Bit Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit
+      containers:
+      - name: fluent-bit
+        image: fluent/fluent-bit:2.2
+        ports:
+        - containerPort: 2020
+          name: http-metrics
+        volumeMounts:
+        - name: log-storage
+          mountPath: /var/log
+          readOnly: true
+        - name: fluent-bit-config
+          mountPath: /fluent-bit/etc/
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: log-storage
+        persistentVolumeClaim:
+          claimName: logs-volume
+      - name: fluent-bit-config
+        configMap:
+          name: fluent-bit-config
+
+---
+# 5. Fluent Bit Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+spec:
+  ports:
+  - port: 2020
+    targetPort: 2020
+    name: http-metrics
+  selector:
+    app: fluent-bit
+
+---
+# 6. ServiceAccount for Fluent Bit
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+
+---
+# 7. ClusterRole for Fluent Bit (optional, for future expansion)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit
+rules:
+- apiGroups: [""]
+  resources:
+  - namespaces
+  - pods
+  verbs: ["get", "list", "watch"]
+
+---
+# 8. ClusterRoleBinding for Fluent Bit
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit
+subjects:
+- kind: ServiceAccount
+  name: fluent-bit
+  namespace: monitoring
